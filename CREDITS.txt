@@ -1,0 +1,18 @@
+KLONDIKE - GOLD RUSH SOLITAIRE
+Version @VERSION@
+==============================
+
+Developed & Published by ... Ironite
+Game Design ................ Ironite
+Card Art & Illustration .... Ironite
+Music ...................... Ironite
+  "Chilkoot Pass Reel", "Dawson City Waltz",
+  "Bonanza Creek", "Sourdough Hoedown"
+Sound Effects .............. Ironite
+Programming ................ Ironite
+
+Special Thanks
+  The stampeders of 1896-1899, and everyone who ever
+  played solitaire on a slow afternoon.
+
+Copyright (c) 2026 Ironite. All rights reserved.
