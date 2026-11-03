@@ -2,7 +2,7 @@
 # Ironite Launcher installs and updates the game from the latest release, so
 # every release must include Klondike-<version>-windows.zip.
 #
-# To release: bump the version and add a new section to web/CHANGELOG.md, then push to
+# To release: bump the version and add a new section to CHANGELOG.md, then push to
 # main. If that version has no release yet, this builds it and publishes
 # v<version> (creating the tag). Pushes that don't change the version do nothing.
 # "Run workflow" on the Actions tab does the same check by hand.
@@ -32,7 +32,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(grep -m1 -oE '^## \[[0-9][0-9.]*' "web/CHANGELOG.md" | tr -d '#[ ')
+          VERSION=$(grep -m1 -oE '^## \[[0-9][0-9.]*' "CHANGELOG.md" | tr -d '#[ ')
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "v$VERSION is already released - nothing to do."; echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -54,14 +54,14 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(tr -d ' \r\n' < "dist/Klondike/VERSION" 2>/dev/null || true)
-          [ -n "$VERSION" ] || VERSION=$(grep -m1 -oE '^## \[[0-9][0-9.]*' "web/CHANGELOG.md" | tr -d '#[ ')
+          [ -n "$VERSION" ] || VERSION=$(grep -m1 -oE '^## \[[0-9][0-9.]*' "CHANGELOG.md" | tr -d '#[ ')
           if [ "${{ github.ref_type }}" = "tag" ] && [ "${{ github.ref_name }}" != "v$VERSION" ]; then
             echo "::error::Tag ${{ github.ref_name }} does not match the game version $VERSION"; exit 1
           fi
           ZIP="Klondike-$VERSION-windows.zip"
           (cd "$(dirname "dist/Klondike")" && zip -qr "$GITHUB_WORKSPACE/$ZIP" "$(basename "dist/Klondike")")
           # Release notes: the newest section of the changelog
-          awk 'BEGIN{n=0} /^## /{n++; if(n==2) exit} n==1 && !/^## /' "web/CHANGELOG.md" > notes.md
+          awk 'BEGIN{n=0} /^## /{n++; if(n==2) exit} n==1 && !/^## /' "CHANGELOG.md" > notes.md
           printf '\n---\nInstall and update this game with **Ironite Launcher** (https://github.com/adamglassner/launcher), or download the zip, unzip it and run Klondike.exe.\n' >> notes.md
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"

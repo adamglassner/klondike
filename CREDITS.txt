@@ -11,6 +11,11 @@ Music ...................... Ironite
 Sound Effects .............. Ironite
 Programming ................ Ironite
 
+Typeface
+  Card and screen text uses Georgia, which comes with
+  Windows. Lora (SIL Open Font License) is built in as
+  a backup.
+
 Special Thanks
   The stampeders of 1896-1899, and everyone who ever
   played solitaire on a slow afternoon.

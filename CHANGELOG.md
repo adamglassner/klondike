@@ -2,6 +2,15 @@
 
 All notable changes to Klondike: Gold Rush Solitaire are recorded here.
 
+## [2.0.0] - 2026-11-03
+
+- Klondike is now a native Windows game written in Go. It no longer opens a browser window, and it starts faster.
+- Same card art, table, music and sound effects as before.
+- New win celebration: the whole deck flies off the foundations into a turning wheel while gold dust bursts over the table.
+- Text is drawn by Windows in Georgia, as before, and stays sharp at any display scaling.
+- Settings and the win record carry over from 1.x automatically.
+- The window remembers its size; F11 toggles full screen.
+
 ## [1.1.0] - 2026-10-20
 
 - Added the Credits & Changelog screen (toolbar > Credits).
