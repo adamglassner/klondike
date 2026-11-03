@@ -2,6 +2,12 @@
 
 All notable changes to Klondike: Gold Rush Solitaire are recorded here.
 
+## [2.1.0] - 2026-11-03
+
+- New claim register: a local top-ten leaderboard of your best wins (toolbar > Scores), with time, moves, draw mode and date.
+- Sign your nickname when you win to put your score on the register. Your name is remembered for next time.
+- Online leaderboard coming soon.
+
 ## [2.0.0] - 2026-11-03
 
 - Klondike is now a native Windows game written in Go. It no longer opens a browser window, and it starts faster.

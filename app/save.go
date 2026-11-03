@@ -21,6 +21,9 @@ type saveData struct {
 	Vol     int  `json:"vol"`
 	Played  int  `json:"played"`
 	Won     int  `json:"won"`
+	// the claim register (local leaderboard)
+	Nickname string       `json:"nickname,omitempty"`
+	Scores   []scoreEntry `json:"scores,omitempty"`
 	// window placement
 	WinW      int  `json:"winW,omitempty"`
 	WinH      int  `json:"winH,omitempty"`
@@ -59,6 +62,18 @@ func (s *saveData) normalize() {
 	}
 	s.Vol = max(0, min(100, s.Vol))
 	s.Version = 2
+	keep := s.Scores[:0]
+	for _, e := range s.Scores {
+		if e.Name = cleanName(e.Name); e.Name != "" && e.Score >= 0 {
+			keep = append(keep, e)
+		}
+	}
+	sortScores(keep)
+	if len(keep) > boardSize {
+		keep = keep[:boardSize]
+	}
+	s.Scores = keep
+	s.Nickname = cleanName(s.Nickname)
 }
 
 func (s saveData) write() {

@@ -88,6 +88,7 @@ const (
 	wmGetMinMaxInfo  = 0x0024
 	wmKeyDown        = 0x0100
 	wmSysKeyDown     = 0x0104
+	wmChar           = 0x0102
 	wmTimer          = 0x0113
 	wmMouseMove      = 0x0200
 	wmLButtonDown    = 0x0201
@@ -427,6 +428,12 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 	case wmMouseWheel:
 		a.wheel(float64(int16(wp>>16)) / 120)
+		return 0
+	case wmChar:
+		if wp >= 0xD800 && wp <= 0xDFFF { // half of an emoji: not for names
+			return 0
+		}
+		a.char(rune(wp))
 		return 0
 	case wmKeyDown, wmSysKeyDown:
 		switch wp {

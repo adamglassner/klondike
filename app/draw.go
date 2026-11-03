@@ -63,6 +63,9 @@ func (a *App) render() *image.RGBA {
 	case panelAbout:
 		a.drawVeil(cv)
 		a.drawAbout(cv)
+	case panelScores:
+		a.drawVeil(cv)
+		a.drawScores(cv)
 	}
 	if a.ddOpen {
 		a.drawDropdown(cv)
@@ -291,6 +294,7 @@ func (a *App) drawToolbar(cv *image.RGBA) {
 	ss := st
 	ss.off = !a.sv.Sfx
 	x += a.button(cv, "sfx", "Sounds", x, by, ss, false) + gap
+	x += a.button(cv, "scores", "Scores", x, by, st, false) + gap
 	x += a.button(cv, "about", "Credits", x, by, st, false) + gap
 	// stats, right-aligned: Score, Moves, Time, Won
 	g := a.g
@@ -455,8 +459,15 @@ func (a *App) drawWin(cv *image.RGBA) {
 		cw = math.Max(cw, l.w)
 	}
 	cw = math.Max(cw, measure("EUREKA!", fontSpec{Size: 40 * s, Bold: true, Spacing: 6 * s}))
+	cw = math.Max(cw, 560*s) // room for the nickname row
 	pw := cw + 96*s + 6*s
-	ph := 3*s + 34*s + 40*s*1.15 + 6*s + 16*s*1.15 + 18*s + 8*s + float64(len(lines))*lh + 22*s + a.buttonH(btnStyle{size: 18 * s, padY: 10 * s}) + 34*s + 3*s
+	entryH := 22 * s
+	if a.entry.open && !a.entry.saved {
+		entryH = a.buttonH(btnStyle{size: 14 * s, padY: 6 * s}) + 4*s
+	} else if a.entry.saved {
+		entryH = 24 * s
+	}
+	ph := 3*s + 34*s + 40*s*1.15 + 6*s + 16*s*1.15 + 18*s + 8*s + float64(len(lines))*lh + 18*s + entryH + 22*s + a.buttonH(btnStyle{size: 18 * s, padY: 10 * s}) + 34*s + 3*s
 	px, py := math.Round((float64(a.W)-pw)/2), math.Round((float64(a.H)-ph)/2)
 	a.panelBox(cv, px, py, pw, ph)
 	a.addHit("panel", px, py, pw, ph)
@@ -465,8 +476,14 @@ func (a *App) drawWin(cv *image.RGBA) {
 	y += a.h1(cv, "EUREKA!", 40, cx, y) + 6*s
 	y += a.h2(cv, "YOU STRUCK GOLD", cx, y) + 18*s + 8*s
 	y += drawParagraph(cv, a.winSpans, pf, lh, px+51*s, y, cw, alignCenter)
+	y += 18 * s
+	y += a.drawEntry(cv, cx, y)
 	y += 22 * s
-	a.bigButton(cv, "again", "Deal Again", cx, y)
+	st := btnStyle{size: 18 * s, padX: 28 * s, padY: 10 * s}
+	w1, w2 := a.buttonW("Deal Again", st), a.buttonW("Leaderboard", st)
+	bx := cx - (w1+12*s+w2)/2
+	a.button(cv, "again", "Deal Again", bx, y, st, false)
+	a.button(cv, "board", "Leaderboard", bx+w1+12*s, y, st, false)
 }
 
 /* ------------------------------------------------------------ the about box */

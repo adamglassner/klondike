@@ -109,6 +109,36 @@ func TestScreens(t *testing.T) {
 	writePNG(t, a.render(), "8b-celebrate.png")
 	step(a, 1)
 	writePNG(t, a.render(), "9-win.png")
+	for _, r := range "Dawson Dan" {
+		a.char(r)
+	}
+	a.update(.01)
+	writePNG(t, a.render(), "10-name.png")
+	a.char('\r')
+	writePNG(t, a.render(), "11-saved.png")
+	if len(a.sv.Scores) != 1 || a.sv.Scores[0].Name != "Dawson Dan" || a.entry.rank != 1 {
+		t.Fatalf("scores = %+v", a.sv.Scores)
+	}
+	// a few more for the board
+	for i, n := range []string{"Klondike Kate", "Skookum Jim", "Soapy Smith", "Swiftwater Bill"} {
+		a.sv.Scores, _ = addScore(a.sv.Scores, scoreEntry{Name: n, Score: 5200 - i*900, Secs: 140 + i*40, Moves: 90 + i*7, Draw: 1 + 2*(i%2), Date: "2026-11-0" + itoa(1+i%3)})
+	}
+	a.highlight = 3
+	a.click("board")
+	writePNG(t, a.render(), "12-board.png")
+	a.click("close")
+	if a.panel != panelWin {
+		t.Fatal("back should return to the win screen")
+	}
+	// the save keeps the board
+	b := loadSave()
+	if len(b.Scores) != 1 || b.Nickname != "Dawson Dan" {
+		t.Fatalf("saved = %+v", b)
+	}
+	a.highlight = 0
+	a.sv.Scores = nil
+	a.click("scores")
+	writePNG(t, a.render(), "13-board-empty.png")
 	if a.sv.Won != 1 {
 		t.Fatalf("won = %d", a.sv.Won)
 	}
@@ -137,5 +167,25 @@ func TestRules(t *testing.T) {
 	}
 	if winBonus(100) != 7000 || winBonus(20) != 0 {
 		t.Fatal("bonus")
+	}
+}
+
+func TestBoard(t *testing.T) {
+	var b []scoreEntry
+	for i := 0; i < 12; i++ {
+		b, _ = addScore(b, scoreEntry{Name: "P" + itoa(i), Score: i * 100, Secs: 100})
+	}
+	if len(b) != boardSize || b[0].Score != 1100 || b[9].Score != 200 {
+		t.Fatalf("board = %+v", b)
+	}
+	if qualifies(b, 150, 100) || !qualifies(b, 200, 90) || !qualifies(b, 300, 500) {
+		t.Fatal("qualifies")
+	}
+	_, r := addScore(b, scoreEntry{Name: "X", Score: 1000, Secs: 50})
+	if r != 2 {
+		t.Fatalf("rank = %d", r)
+	}
+	if cleanName("  Gold   Rush  Gus the Great Prospector ") != "Gold Rush Gus th" {
+		t.Fatalf("clean = %q", cleanName("  Gold   Rush  Gus the Great Prospector "))
 	}
 }

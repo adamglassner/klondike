@@ -63,6 +63,7 @@ const (
 	panelSplash
 	panelWin
 	panelAbout
+	panelScores
 )
 
 type later struct {
@@ -90,16 +91,22 @@ type App struct {
 	table                                *image.RGBA
 	tableHQ                              bool
 
-	disp     [52]dispCard
-	drag     *dragState
-	cel      *celebration
-	nextAuto float64
-	started  bool
-	panel    panelKind
-	aboutTab int
-	scrollY  float64
-	winSpans []span
-	timers   []later
+	disp        [52]dispCard
+	drag        *dragState
+	cel         *celebration
+	nextAuto    float64
+	started     bool
+	panel       panelKind
+	aboutTab    int
+	scrollY     float64
+	winSpans    []span
+	prevPanel   panelKind // where Back to the Table returns from Credits/Scores
+	entry       winEntry  // nickname box on the win screen
+	entrySelAll bool      // the suggested name is selected (typing replaces it)
+	caretAt     float64
+	caretPhase  int
+	highlight   int // board place to highlight (just saved), or 0
+	timers      []later
 
 	hover, press   string
 	ddOpen         bool // Draw One / Draw Three dropdown
@@ -255,6 +262,7 @@ func (a *App) newGame() {
 	a.timers = nil
 	a.g = newGame(a.sv.Draw, a.rnd)
 	a.bindSound(a.g)
+	a.entry = winEntry{}
 	for i := range a.disp {
 		a.disp[i] = dispCard{x: a.colX(0), y: a.top0, f0: -1}
 	}
@@ -287,6 +295,7 @@ func (a *App) win() {
 	secs := max(1, int(math.Round(g.Elapsed)))
 	bonus := winBonus(secs)
 	g.Score += bonus
+	a.prepareEntry(g.Score, secs, g.Moves)
 	a.sv.Won++
 	a.sv.write()
 	mix.play("fanfare", 0)
@@ -526,6 +535,12 @@ func (a *App) update(dt float64) bool {
 		a.hudSec = sec
 		a.dirty = true
 	}
+	if a.typing() { // blink the caret
+		if ph := int((a.now - a.caretAt) / .53); ph != a.caretPhase {
+			a.caretPhase = ph
+			a.dirty = true
+		}
+	}
 	r := a.dirty || moving
 	a.dirty = false
 	return r
@@ -723,13 +738,28 @@ func (a *App) click(id string) {
 	case "sfx":
 		a.toggleSfx()
 	case "about":
+		a.prevPanel = a.panel
 		a.panel, a.aboutTab, a.scrollY = panelAbout, 0, 0
+	case "scores":
+		a.prevPanel, a.highlight = a.panel, 0
+		a.panel = panelScores
+	case "board":
+		a.prevPanel = a.panel
+		a.panel = panelScores
+	case "savescore":
+		a.saveEntry()
+	case "name":
+		a.entrySelAll = false
+		a.caretAt = a.now
 	case "start":
 		a.start()
 	case "again":
 		a.newGame()
 	case "close":
 		a.panel = panelNone
+		if a.prevPanel == panelWin && a.g.Won {
+			a.panel = panelWin
+		}
 		if !a.started {
 			a.panel = panelSplash
 		}
@@ -785,7 +815,7 @@ func (a *App) key(k int) {
 	case keyEscape:
 		if a.ddOpen {
 			a.ddOpen = false
-		} else if a.panel == panelAbout {
+		} else if a.panel == panelAbout || a.panel == panelScores {
 			a.click("close")
 		}
 	}
