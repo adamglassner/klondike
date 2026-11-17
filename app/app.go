@@ -109,7 +109,8 @@ type App struct {
 	timers      []later
 
 	hover, press   string
-	ddOpen         bool // Draw One / Draw Three dropdown
+	ddOpen         bool     // Draw One / Draw Three dropdown
+	tb             tbLayout // how the toolbar fits this window
 	ddX, ddY, ddW  float64
 	noHits         bool
 	slider         bool // dragging the volume slider
@@ -159,7 +160,8 @@ func (a *App) resize(w, h int, scale float64) {
 		a.chrome = nil
 	}
 	s := a.s
-	a.bar = math.Round(50 * s)
+	a.tb = a.fitToolbar()
+	a.bar = a.tb.bar
 	a.tw, a.th = float64(w), float64(h)-a.bar
 	const gr = .14
 	a.cw = math.Floor(math.Min((a.tw-40*s)/(7+6*gr), (a.th-30*s)/4.75))

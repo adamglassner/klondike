@@ -196,8 +196,9 @@ func (a *App) buttonH(st btnStyle) float64 { return math.Round(st.size*1.15 + 2*
 func (a *App) button(cv *image.RGBA, id, label string, x, y float64, st btnStyle, arrow bool) float64 {
 	s := a.s
 	w := a.buttonW(label, st)
+	ak := st.size / (14 * s) // arrow scales with the button
 	if arrow {
-		w += 16 * s
+		w += 16 * s * ak
 	}
 	h := a.buttonH(st)
 	a.addHit(id, x, y, w, h)
@@ -224,12 +225,12 @@ func (a *App) button(cv *image.RGBA, id, label string, x, y float64, st btnStyle
 	strokeRRect(cv, x, y, w, h, r, 1*s, uni(hex("#6b4a22")))
 	tx := x + w/2
 	if arrow {
-		tx -= 8 * s
+		tx -= 8 * s * ak
 	}
 	drawText(cv, label, fontSpec{Size: st.size}, ink, tx, y+h/2+st.size*.33, alignCenter)
 	if arrow {
-		ax, ay := x+w-st.padX-4*s, y+h/2
-		fillPoly(cv, [][2]float64{{ax - 4.5*s, ay - 2.5*s}, {ax + 4.5*s, ay - 2.5*s}, {ax, ay + 3*s}}, uni(ink))
+		ax, ay, as := x+w-st.padX-4*s*ak, y+h/2, s*ak
+		fillPoly(cv, [][2]float64{{ax - 4.5*as, ay - 2.5*as}, {ax + 4.5*as, ay - 2.5*as}, {ax, ay + 3*as}}, uni(ink))
 	}
 	return w
 }
@@ -239,8 +240,100 @@ func bright(c color.RGBA, f float64) color.RGBA {
 	return color.RGBA{m(c.R), m(c.G), m(c.B), c.A}
 }
 
+// tbLayout is how the toolbar fits the window. Narrow windows first lose the
+// subtitle, then the controls shrink, and finally the stats move to a second
+// row (and, narrowest of all, the title steps aside).
+type tbLayout struct {
+	k       float64 // control size factor
+	sub     bool    // show "GOLD RUSH SOLITAIRE"
+	title   bool
+	twoRows bool
+	bar     float64
+	row1    float64 // height of the first row
+}
+
+func (a *App) tbStyle(k float64) btnStyle {
+	s := a.s * k
+	return btnStyle{size: 14 * s, padX: 12 * s, padY: 6 * s}
+}
+
+func (a *App) tbTitleW(k float64, sub bool) float64 {
+	s := a.s * k
+	w := measure("KLONDIKE", fontSpec{Size: 22 * s, Bold: true, Spacing: 5 * s})
+	if sub {
+		w += 6*s + measure("GOLD RUSH SOLITAIRE", fontSpec{Size: 11 * s, Spacing: 2 * s})
+	}
+	return w + 12*s
+}
+
+func (a *App) tbControlsW(k float64) float64 {
+	s := a.s * k
+	st := a.tbStyle(k)
+	gap := 8 * s
+	w := gap
+	for _, l := range []string{"New Game", "Undo", "Sounds", "Scores", "Credits"} {
+		w += a.buttonW(l, st) + gap
+	}
+	w += a.buttonW("Draw Three", st) + 16*s + gap
+	w += math.Max(a.buttonW("♪ Music", st), a.buttonW("♪ Muted", st)) + gap
+	w += 80*s + gap
+	return w
+}
+
+func (a *App) tbStats() [][2]string {
+	score, moves, secs := 0, 0, 0
+	if g := a.g; g != nil {
+		score, moves, secs = g.Score, g.Moves, int(g.Elapsed)
+	}
+	return [][2]string{{"Score", commas(score)}, {"Moves", itoa(moves)}, {"Time", clock(secs)}, {"Won", itoa(a.sv.Won) + "/" + itoa(a.sv.Played)}}
+}
+
+// tbStatsW is the stats' width with room for numbers to grow.
+func (a *App) tbStatsW(k float64) float64 {
+	s := a.s * k
+	f, fb := fontSpec{Size: 15 * s}, fontSpec{Size: 15 * s, Bold: true}
+	w := 0.0
+	for _, it := range [][2]string{{"Score", "88,888"}, {"Moves", "8888"}, {"Time", "88:88"}, {"Won", "888/888"}} {
+		w += measure(it[0]+" ", f) + measure(it[1], fb) + 20*s
+	}
+	return w - 20*s
+}
+
+func (a *App) fitToolbar() tbLayout {
+	s := a.s
+	W := float64(a.W)
+	edge := 14 * s
+	for _, o := range []struct {
+		k   float64
+		sub bool
+	}{{1, true}, {1, false}, {.92, false}, {.85, false}} {
+		need := edge + a.tbTitleW(o.k, o.sub) + a.tbControlsW(o.k) + 20*s + a.tbStatsW(o.k) + edge
+		if need <= W {
+			b := math.Round(50 * s)
+			return tbLayout{k: o.k, sub: o.sub, title: true, bar: b, row1: b}
+		}
+	}
+	// two rows: title and controls on top, the stats underneath
+	row2 := math.Round(30 * s)
+	for _, title := range []bool{true, false} {
+		for _, k := range []float64{1, .92, .85, .78, .72, .66, .6} {
+			need := 2*edge + a.tbControlsW(k)
+			if title {
+				need += a.tbTitleW(k, false)
+			}
+			if need <= W || (!title && k == .6) {
+				r1 := math.Round(50 * s * math.Max(k, .8))
+				return tbLayout{k: k, title: title, twoRows: true, bar: r1 + row2, row1: r1}
+			}
+		}
+	}
+	return tbLayout{}
+}
+
 func (a *App) drawToolbar(cv *image.RGBA) {
 	s := a.s
+	L := a.tb
+	ks := s * L.k
 	ch := a.chromeC()
 	blit(cv, ch.barBG, 0, 0)
 	toolbar := a.panel == panelNone
@@ -248,20 +341,36 @@ func (a *App) drawToolbar(cv *image.RGBA) {
 		a.noHits = true
 		defer func() { a.noHits = false }()
 	}
-	mid := (a.bar - 2*s) / 2
+	mid := (L.row1 - 2*s) / 2
+	if L.twoRows {
+		mid = L.row1 / 2
+	}
 	x := 14 * s
-	// title: 22px bold, letter-spacing 5px, gold, text-shadow 0 1px 0 #000
-	tf := fontSpec{Size: 22 * s, Bold: true, Spacing: 5 * s}
-	base := mid + 22*s*.35
-	drawText(cv, "KLONDIKE", tf, col(232, 198, 106, .22), x, base, alignLeft) // soft glow
-	x += drawTextShadow(cv, "KLONDIKE", tf, hex("#e8c66a"), hex("#000000"), x, base, 0, 1*s, alignLeft)
-	x += 6 * s
-	x += drawText(cv, "GOLD RUSH SOLITAIRE", fontSpec{Size: 11 * s, Spacing: 2 * s}, hex("#c9a96a"), x, base, alignLeft)
-	x += 12 * s
-	st := btnStyle{size: 14 * s, padX: 12 * s, padY: 6 * s}
+	if L.title {
+		// title: 22px bold, letter-spacing 5px, gold, text-shadow 0 1px 0 #000
+		tf := fontSpec{Size: 22 * ks, Bold: true, Spacing: 5 * ks}
+		base := mid + 22*ks*.35
+		drawText(cv, "KLONDIKE", tf, col(232, 198, 106, .22), x, base, alignLeft) // soft glow
+		x += drawTextShadow(cv, "KLONDIKE", tf, hex("#e8c66a"), hex("#000000"), x, base, 0, 1*s, alignLeft)
+		if L.sub {
+			x += 6 * ks
+			x += drawText(cv, "GOLD RUSH SOLITAIRE", fontSpec{Size: 11 * ks, Spacing: 2 * ks}, hex("#c9a96a"), x, base, alignLeft)
+		}
+		x += 12 * ks
+	} else {
+		x -= 8 * ks // no title: start the buttons at the edge
+	}
+	st := a.tbStyle(L.k)
 	bh := a.buttonH(st)
 	by := math.Round(mid - bh/2)
-	gap := 8 * s
+	gap := 8 * ks
+	if L.twoRows { // spread the controls across the row
+		free := float64(a.W) - 28*s - (x - 14*s) - a.tbControlsW(L.k)
+		if !L.title {
+			free = float64(a.W) - 28*s + 8*ks - a.tbControlsW(L.k)
+		}
+		gap += math.Max(0, math.Min(free/9, 10*s))
+	}
 	x += gap
 	x += a.button(cv, "new", "New Game", x, by, st, false) + gap
 	x += a.button(cv, "undo", "Undo", x, by, st, false) + gap
@@ -271,7 +380,7 @@ func (a *App) drawToolbar(cv *image.RGBA) {
 	}
 	dst := st
 	dst.minW = a.buttonW("Draw Three", st)
-	a.ddX, a.ddY, a.ddW = x, by+bh, dst.minW+16*s
+	a.ddX, a.ddY, a.ddW = x, by+bh, dst.minW+16*ks
 	x += a.button(cv, "draw", drawLabel, x, by, dst, true) + gap
 	ms := st
 	ms.off = !a.sv.Music
@@ -281,29 +390,43 @@ func (a *App) drawToolbar(cv *image.RGBA) {
 	}
 	x += a.button(cv, "music", ml, x, by, ms, false) + gap
 	// volume slider (input type=range, accent #c9a464)
-	sw := 80 * s
+	sw := 80 * ks
 	a.addHit("vol", x, by, sw, bh)
 	v := float64(a.sv.Vol) / 100
 	ty := mid
-	fillRRect(cv, x, ty-2.5*s, sw, 5*s, 2.5*s, uni(col(255, 255, 255, .82)))
-	fillRRect(cv, x, ty-2.5*s, math.Max(5*s, sw*v), 5*s, 2.5*s, uni(hex("#c9a464")))
-	kx := x + 8*s + (sw-16*s)*v
-	fillCircle(cv, kx, ty, 8*s, uni(hex("#c9a464")))
-	fillCircle(cv, kx, ty, 8*s-1.2*s, uni(bright(hex("#c9a464"), map[bool]float64{true: 1.1, false: 1}[a.hover == "vol"])))
+	kr := 8 * ks
+	fillRRect(cv, x, ty-2.5*ks, sw, 5*ks, 2.5*ks, uni(col(255, 255, 255, .82)))
+	fillRRect(cv, x, ty-2.5*ks, math.Max(5*ks, sw*v), 5*ks, 2.5*ks, uni(hex("#c9a464")))
+	kx := x + kr + (sw-2*kr)*v
+	fillCircle(cv, kx, ty, kr, uni(hex("#c9a464")))
+	fillCircle(cv, kx, ty, kr-1.2*ks, uni(bright(hex("#c9a464"), map[bool]float64{true: 1.1, false: 1}[a.hover == "vol"])))
 	x += sw + gap
 	ss := st
 	ss.off = !a.sv.Sfx
 	x += a.button(cv, "sfx", "Sounds", x, by, ss, false) + gap
 	x += a.button(cv, "scores", "Scores", x, by, st, false) + gap
 	x += a.button(cv, "about", "Credits", x, by, st, false) + gap
-	// stats, right-aligned: Score, Moves, Time, Won
-	g := a.g
-	score, moves, secs := 0, 0, 0
-	if g != nil {
-		score, moves, secs = g.Score, g.Moves, int(g.Elapsed)
+	// stats: Score, Moves, Time, Won - right-aligned, or centred on row two
+	items := a.tbStats()
+	f, fb := fontSpec{Size: 15 * ks}, fontSpec{Size: 15 * ks, Bold: true}
+	if L.twoRows {
+		f, fb = fontSpec{Size: 15 * s}, fontSpec{Size: 15 * s, Bold: true}
+		// a faint rule between the rows
+		fillRect(cv, image.Rect(int(14*s), int(L.row1), a.W-int(14*s), int(L.row1+math.Max(1, s))), col(0, 0, 0, .35))
+		fillRect(cv, image.Rect(int(14*s), int(L.row1+math.Max(1, s)), a.W-int(14*s), int(L.row1+2*math.Max(1, s))), col(255, 230, 180, .08))
+		base := L.row1 + (L.bar-L.row1-2*s)/2 + 15*s*.35
+		total := 0.0
+		for _, it := range items {
+			total += measure(it[0]+" ", f) + measure(it[1], fb) + 28*s
+		}
+		x := (float64(a.W) - (total - 28*s)) / 2
+		for _, it := range items {
+			x += drawText(cv, it[0]+" ", f, hex("#f1dfb8"), x, base, alignLeft)
+			x += drawText(cv, it[1], fb, hex("#e8c66a"), x, base, alignLeft) + 28*s
+		}
+		return
 	}
-	items := [][2]string{{"Score", commas(score)}, {"Moves", itoa(moves)}, {"Time", clock(secs)}, {"Won", itoa(a.sv.Won) + "/" + itoa(a.sv.Played)}}
-	f, fb := fontSpec{Size: 15 * s}, fontSpec{Size: 15 * s, Bold: true}
+	base := mid + 22*s*.35
 	rx := float64(a.W) - 14*s
 	for i := len(items) - 1; i >= 0; i-- {
 		rx -= drawText(cv, items[i][1], fb, hex("#e8c66a"), rx, base, alignRight)

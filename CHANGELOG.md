@@ -2,6 +2,10 @@
 
 All notable changes to Klondike: Gold Rush Solitaire are recorded here.
 
+## [2.1.1] - 2026-11-17
+
+- Fixed: on smaller screens and at higher display scaling, the score, moves, time and wins ran over the toolbar buttons. The toolbar now fits any window: the subtitle steps aside first, then the buttons shrink, and on narrow windows the stats move to a row of their own.
+
 ## [2.1.0] - 2026-11-03
 
 - New claim register: a local top-ten leaderboard of your best wins (toolbar > Scores), with time, moves, draw mode and date.
