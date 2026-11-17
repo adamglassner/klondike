@@ -130,6 +130,8 @@ func loadArt() error {
 // spriteSet holds every card sprite scaled for the current card width.
 type spriteSet struct {
 	cw   float64 // card width the set was built for
+	back int     // card back colourway
+	four bool    // four-colour suits
 	k    float64 // scale from the master art
 	pad  float64 // sprite margin (shadow) at this scale
 	lift float64 // margin of the drag-shadow sprite
@@ -141,19 +143,29 @@ var fontRE = regexp.MustCompile(`(bold\s+)?(italic\s+)?([\d.]+)px`)
 
 // buildSprites scales the card art to card width cw and draws each card's
 // text on top (in Georgia on Windows).
-func buildSprites(cw float64, hq bool) *spriteSet {
+func buildSprites(cw float64, hq bool, back int, four bool) *spriteSet {
 	k := cw / float64(A.meta.CW)
-	s := &spriteSet{cw: cw, k: k, pad: float64(A.meta.Pad) * k, lift: float64(A.meta.LiftMargin) * k, hq: hq}
+	s := &spriteSet{cw: cw, k: k, pad: float64(A.meta.Pad) * k, lift: float64(A.meta.LiftMargin) * k, hq: hq, back: back, four: four}
 	var wg sync.WaitGroup
 	for i := 0; i < sprCount; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			m := A.master[i]
+			if i == sprBack {
+				m = backArt(back)
+			} else if i < 52 {
+				m = faceArt(i, four)
+			}
 			w := int(math.Round(float64(m.Rect.Dx()) * k))
 			h := int(math.Round(float64(m.Rect.Dy()) * k))
 			img := scaleImage(m, w, h, hq)
 			for _, op := range A.meta.Text[spriteNames[i]] {
+				if i < 52 && four {
+					if from, to, ok := fourColour(i); ok && css(op.Color) == css(cssOf(from)) {
+						op.Color = cssOf(to)
+					}
+				}
 				drawTextOp(img, op, k)
 			}
 			s.img[i] = img
@@ -207,8 +219,7 @@ func drawTextOp(dst *image.RGBA, op textOp, k float64) {
 
 // coverTable scales the plank table to cover w x h (like the original,
 // which drew it to fill the window).
-func coverTable(w, h int, hq bool) *image.RGBA {
-	t := A.table
+func coverTable(t *image.RGBA, w, h int, hq bool) *image.RGBA {
 	s := math.Max(float64(w)/float64(t.Rect.Dx()), float64(h)/float64(t.Rect.Dy()))
 	sw, sh := int(math.Ceil(float64(t.Rect.Dx())*s)), int(math.Ceil(float64(t.Rect.Dy())*s))
 	big := scaleImage(t, sw, sh, hq)

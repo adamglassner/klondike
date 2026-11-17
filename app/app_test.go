@@ -88,7 +88,7 @@ func TestScreens(t *testing.T) {
 	a.click("close")
 	a.click("draw")
 	writePNG(t, a.render(), "7-dropdown.png")
-	a.ddOpen = false
+	a.menu = ""
 	// force a win
 	g := a.g
 	for s := 0; s < 4; s++ {

@@ -66,9 +66,15 @@ func (a *App) render() *image.RGBA {
 	case panelScores:
 		a.drawVeil(cv)
 		a.drawScores(cv)
+	case panelOptions:
+		a.drawVeil(cv)
+		a.drawOptions(cv)
 	}
-	if a.ddOpen {
-		a.drawDropdown(cv)
+	if a.panel == panelNone || a.panel == panelWin {
+		a.drawToast(cv)
+	}
+	if a.menu != "" {
+		a.drawMenu(cv)
 	}
 	return cv
 }
@@ -81,14 +87,14 @@ func (a *App) drawTable(cv *image.RGBA) {
 	slot := func(x, y float64, which int) {
 		blit(cv, sp.img[which], int(math.Round(x-sp.pad)), int(math.Round(y+oy-sp.pad)))
 	}
-	if a.g != nil && len(a.g.Waste) > 0 {
-		slot(a.colX(0), a.top0, sprSlotR)
+	if a.g != nil && len(a.g.Waste) > 0 && a.g.canRecycle() {
+		slot(a.stockX(), a.top0, sprSlotR)
 	} else {
-		slot(a.colX(0), a.top0, sprSlot)
+		slot(a.stockX(), a.top0, sprSlot)
 	}
-	slot(a.colX(1), a.top0, sprSlot)
+	slot(a.wasteX(), a.top0, sprSlot)
 	for f := 0; f < 4; f++ {
-		slot(a.colX(3+f), a.top0, sprSlotA)
+		slot(a.foundX(f), a.top0, sprSlotA)
 	}
 	for t := 0; t < 7; t++ {
 		slot(a.colX(t), a.tabY, sprSlot)
@@ -97,7 +103,8 @@ func (a *App) drawTable(cv *image.RGBA) {
 		return
 	}
 	T := a.targets()
-	var moving, dragged []target
+	var moving, dragged, held []target
+	k := a.kb
 	for _, t := range T {
 		id := t.c.ID
 		d := a.disp[id]
@@ -108,21 +115,129 @@ func (a *App) drawTable(cv *image.RGBA) {
 			dragged = append(dragged, t)
 			continue
 		}
+		if k.held && t.pile == k.src && t.idx >= k.sidx {
+			held = append(held, t)
+			continue
+		}
 		if math.Abs(t.x-d.x)+math.Abs(t.y-d.y) > 2 {
 			moving = append(moving, t)
 		} else {
-			a.paint(cv, t, false)
+			a.paint(cv, t, false, 0)
 		}
 	}
 	for _, t := range moving {
-		a.paint(cv, t, false)
+		a.paint(cv, t, false, 0)
+	}
+	if a.hintOn.on {
+		a.drawHint(cv, T)
+	}
+	lift := -10 * a.s
+	for _, t := range held {
+		a.paint(cv, t, true, lift)
+	}
+	if k.on && a.panel == panelNone {
+		a.drawCursor(cv, T, lift)
 	}
 	for _, t := range dragged {
-		a.paint(cv, t, true)
+		a.paint(cv, t, true, 0)
 	}
 	if a.cel != nil {
 		a.drawCelebration(cv)
 	}
+}
+
+// ring outlines a card-sized area (table coordinates), with a soft glow.
+func (a *App) ring(cv *image.RGBA, x, y, w, h float64, c color.RGBA, width float64) {
+	r := a.cw * .075
+	glow := c
+	glow.A /= 3
+	glow.R, glow.G, glow.B = uint8(int(c.R)/3), uint8(int(c.G)/3), uint8(int(c.B)/3) // premultiplied
+	gw := width * 2.6
+	strokeRRect(cv, x-gw/2, y+a.bar-gw/2, w+gw, h+gw, r+gw/2, gw, uni(glow))
+	strokeRRect(cv, x-width/2, y+a.bar-width/2, w+width, h+width, r+width/2, width, uni(c))
+}
+
+// pileRect is the area of pile p from card idx down (a slot if it's empty).
+func (a *App) pileRect(T []target, p pileRef, idx int) (x, y, w, h float64) {
+	x, y = a.pileX(p), a.top0
+	if p.Kind == pTab {
+		y = a.tabY
+	}
+	w, h = a.cw, a.ch
+	first := true
+	for _, t := range T {
+		if t.pile != p || t.idx < idx {
+			continue
+		}
+		if first {
+			x, y, first = t.x, t.y, false
+		}
+		h = t.y + a.ch - y
+		x = math.Max(x, t.x) // a fanned waste: the top card
+	}
+	if p.Kind == pWaste || p.Kind == pFound || p.Kind == pStock {
+		for _, t := range T {
+			if t.pile == p {
+				x, y = t.x, t.y
+			}
+		}
+		h = a.ch
+	}
+	return
+}
+
+func (a *App) drawHint(cv *image.RGBA, T []target) {
+	m := a.hintOn.m
+	t := a.now - a.hintOn.t0
+	al := (.75 + .25*math.Sin(t*7)) * clamp((hintLife-t)/.4, 0, 1) * clamp(t/.15, 0, 1)
+	w := 4.5 * a.s
+	x, y, cw, ch := a.pileRect(T, m.src, m.idx)
+	a.ring(cv, x, y, cw, ch, col(255, 214, 102, al), w)
+	if m.src.Kind == pStock {
+		return
+	}
+	dx, dy, dw, dh := a.pileRect(T, m.dst, 1<<20)
+	if m.dst.Kind == pTab && len(a.g.Tab[m.dst.I]) > 0 {
+		n := len(a.g.Tab[m.dst.I]) - 1
+		dx, dy, dw, dh = a.pileRect(T, m.dst, n)
+	}
+	a.ring(cv, dx, dy, dw, dh, col(120, 214, 150, al), w)
+}
+
+func (a *App) drawCursor(cv *image.RGBA, T []target, lift float64) {
+	k := a.kb
+	idx := 0
+	if k.at.Kind == pTab {
+		idx = k.idx
+	}
+	x, y, w, h := a.pileRect(T, k.at, idx)
+	if k.held && k.at == k.src {
+		y += lift
+	}
+	a.ring(cv, x, y, w, h, hex("#ffd451"), 4*a.s)
+	if k.held {
+		hx, hy, hw, hh := a.pileRect(T, k.src, k.sidx)
+		a.ring(cv, hx, hy+lift, hw, hh, col(120, 214, 150, 1), 2.5*a.s)
+	}
+}
+
+// drawToast shows a short message at the bottom of the table.
+func (a *App) drawToast(cv *image.RGBA) {
+	t := a.now - a.toastAt
+	if t < 0 || t > toastLife || a.toastText == "" {
+		return
+	}
+	s := a.s
+	al := clamp(t/.2, 0, 1) * clamp((toastLife-t)/.4, 0, 1)
+	f := fontSpec{Size: 15 * s}
+	w := measure(a.toastText, f) + 36*s
+	h := 38 * s
+	x := (float64(a.W) - w) / 2
+	y := float64(a.H) - h - 34*s
+	fillRRect(cv, x, y+2*s, w, h, h/2, uni(col(0, 0, 0, .3*al)))
+	fillRRect(cv, x, y, w, h, h/2, uni(col(30, 16, 8, .9*al)))
+	strokeRRect(cv, x, y, w, h, h/2, 1.5*s, uni(col(232, 198, 106, .8*al)))
+	drawText(cv, a.toastText, f, col(241, 223, 184, al), x+w/2, y+h/2+15*s*.34, alignCenter)
 }
 
 func (a *App) drawCelebration(cv *image.RGBA) {
@@ -141,7 +256,7 @@ func (a *App) drawCelebration(cv *image.RGBA) {
 }
 
 // paint draws one card where it is displayed, mid-flip if it's turning.
-func (a *App) paint(cv *image.RGBA, t target, shadow bool) {
+func (a *App) paint(cv *image.RGBA, t target, shadow bool, dy float64) {
 	sp := a.spr
 	d := a.disp[t.c.ID]
 	ft := (a.now - d.f0) / .23
@@ -156,7 +271,7 @@ func (a *App) paint(cv *image.RGBA, t target, shadow bool) {
 	if up {
 		img = sp.img[t.c.ID]
 	}
-	x, y := d.x, d.y+a.bar
+	x, y := d.x, d.y+a.bar+dy
 	if shadow {
 		l := sp.img[sprLift]
 		blit(cv, l, int(math.Round(x-sp.pad-sp.lift)), int(math.Round(y-sp.pad-sp.lift)))
@@ -242,7 +357,8 @@ func bright(c color.RGBA, f float64) color.RGBA {
 
 // tbLayout is how the toolbar fits the window. Narrow windows first lose the
 // subtitle, then the controls shrink, and finally the stats move to a second
-// row (and, narrowest of all, the title steps aside).
+// row (and, narrowest of all, the title steps aside). On a touch screen the
+// controls start larger.
 type tbLayout struct {
 	k       float64 // control size factor
 	sub     bool    // show "GOLD RUSH SOLITAIRE"
@@ -266,26 +382,83 @@ func (a *App) tbTitleW(k float64, sub bool) float64 {
 	return w + 12*s
 }
 
-func (a *App) tbControlsW(k float64) float64 {
+const (
+	tbButton = iota
+	tbMenu   // a button with a drop-down arrow
+	tbSplit  // the narrow arrow half of a split button
+	tbSlider
+)
+
+type tbItem struct {
+	id, label string
+	kind      int
+	widest    string // the widest label this control can show
+	off       bool
+}
+
+func (a *App) tbItems() []tbItem {
+	drawLabel := "Draw One"
+	if a.sv.Draw == 3 {
+		drawLabel = "Draw Three"
+	}
+	ml := "♪ Music"
+	if !a.sv.Music {
+		ml = "♪ Muted"
+	}
+	return []tbItem{
+		{id: "new", label: "New Game"}, {id: "gamemenu", kind: tbSplit},
+		{id: "undo", label: "Undo"}, {id: "redo", label: "Redo"}, {id: "hint", label: "Hint"},
+		{id: "draw", label: drawLabel, kind: tbMenu, widest: "Draw Three"},
+		{id: "music", label: ml, widest: "♪ Muted", off: !a.sv.Music},
+		{id: "vol", kind: tbSlider},
+		{id: "sfx", label: "Sounds", off: !a.sv.Sfx},
+		{id: "options", label: "Options"}, {id: "scores", label: "Scores"}, {id: "about", label: "Credits"},
+	}
+}
+
+// tbItemW is a control's width, and the gap before it.
+func (a *App) tbItemW(it tbItem, k float64) (w, gap float64) {
 	s := a.s * k
 	st := a.tbStyle(k)
-	gap := 8 * s
-	w := gap
-	for _, l := range []string{"New Game", "Undo", "Sounds", "Scores", "Credits"} {
-		w += a.buttonW(l, st) + gap
+	gap = 8 * s
+	switch it.kind {
+	case tbSlider:
+		return 80 * s, gap
+	case tbSplit:
+		return a.buttonW("", st) + 6*s, 2 * a.s
+	case tbMenu:
+		return math.Max(a.buttonW(it.label, st), a.buttonW(it.widest, st)) + 16*s, gap
 	}
-	w += a.buttonW("Draw Three", st) + 16*s + gap
-	w += math.Max(a.buttonW("♪ Music", st), a.buttonW("♪ Muted", st)) + gap
-	w += 80*s + gap
-	return w
+	w = a.buttonW(it.label, st)
+	if it.widest != "" {
+		w = math.Max(w, a.buttonW(it.widest, st))
+	}
+	return w, gap
+}
+
+func (a *App) tbControlsW(k float64) float64 {
+	w := 0.0
+	for _, it := range a.tbItems() {
+		iw, g := a.tbItemW(it, k)
+		w += iw + g
+	}
+	return w + 8*a.s*k
 }
 
 func (a *App) tbStats() [][2]string {
-	score, moves, secs := 0, 0, 0
-	if g := a.g; g != nil {
-		score, moves, secs = g.Score, g.Moves, int(g.Elapsed)
+	moves, secs := 0, 0
+	g := a.g
+	if g != nil {
+		moves, secs = g.Moves, int(g.Elapsed)
 	}
-	return [][2]string{{"Score", commas(score)}, {"Moves", itoa(moves)}, {"Time", clock(secs)}, {"Won", itoa(a.sv.Won) + "/" + itoa(a.sv.Played)}}
+	first := [2]string{"Score", "0"}
+	if g != nil {
+		first[1] = commas(g.Score)
+	}
+	if (g != nil && g.Vegas) || (g == nil && a.sv.Vegas) {
+		first = [2]string{"Poke", dollars(a.pokeNow())}
+	}
+	return [][2]string{first, {"Moves", itoa(moves)}, {"Time", clock(secs)}, {"Won", itoa(a.sv.Won) + "/" + itoa(a.sv.Played)}}
 }
 
 // tbStatsW is the stats' width with room for numbers to grow.
@@ -303,25 +476,35 @@ func (a *App) fitToolbar() tbLayout {
 	s := a.s
 	W := float64(a.W)
 	edge := 14 * s
+	big := 1.0
+	ks := []float64{1, .92, .85, .78, .72, .66, .6}
+	if a.touchUI() { // finger-sized: don't shrink as far
+		big = 1.2
+		ks = []float64{1.2, 1.1, 1, .92, .85}
+	}
 	for _, o := range []struct {
 		k   float64
 		sub bool
-	}{{1, true}, {1, false}, {.92, false}, {.85, false}} {
-		need := edge + a.tbTitleW(o.k, o.sub) + a.tbControlsW(o.k) + 20*s + a.tbStatsW(o.k) + edge
+	}{{big, true}, {big, false}, {big * .92, false}, {big * .85, false}} {
+		need := edge + a.tbTitleW(o.k, o.sub) + a.tbControlsW(o.k) + 20*s + a.tbStatsW(math.Min(o.k, 1)) + edge
 		if need <= W {
-			b := math.Round(50 * s)
+			b := math.Round(50 * s * math.Max(1, o.k))
 			return tbLayout{k: o.k, sub: o.sub, title: true, bar: b, row1: b}
 		}
 	}
 	// two rows: title and controls on top, the stats underneath
 	row2 := math.Round(30 * s)
+	if a.touchUI() {
+		row2 = math.Round(34 * s)
+	}
+	last := ks[len(ks)-1]
 	for _, title := range []bool{true, false} {
-		for _, k := range []float64{1, .92, .85, .78, .72, .66, .6} {
+		for _, k := range ks {
 			need := 2*edge + a.tbControlsW(k)
 			if title {
 				need += a.tbTitleW(k, false)
 			}
-			if need <= W || (!title && k == .6) {
+			if need <= W || (!title && k == last) {
 				r1 := math.Round(50 * s * math.Max(k, .8))
 				return tbLayout{k: k, title: title, twoRows: true, bar: r1 + row2, row1: r1}
 			}
@@ -363,52 +546,54 @@ func (a *App) drawToolbar(cv *image.RGBA) {
 	st := a.tbStyle(L.k)
 	bh := a.buttonH(st)
 	by := math.Round(mid - bh/2)
-	gap := 8 * ks
+	extra := 0.0
 	if L.twoRows { // spread the controls across the row
-		free := float64(a.W) - 28*s - (x - 14*s) - a.tbControlsW(L.k)
-		if !L.title {
-			free = float64(a.W) - 28*s + 8*ks - a.tbControlsW(L.k)
+		free := float64(a.W) - 14*s - x - a.tbControlsW(L.k)
+		extra = math.Max(0, math.Min(free/11, 10*s))
+	}
+	for _, it := range a.tbItems() {
+		w, gap := a.tbItemW(it, L.k)
+		if it.kind != tbSplit {
+			gap += extra
 		}
-		gap += math.Max(0, math.Min(free/9, 10*s))
+		x += gap
+		switch it.kind {
+		case tbSlider:
+			a.addHit("vol", x, by, w, bh)
+			v := float64(a.sv.Vol) / 100
+			ty := mid
+			kr := 8 * ks
+			fillRRect(cv, x, ty-2.5*ks, w, 5*ks, 2.5*ks, uni(col(255, 255, 255, .82)))
+			fillRRect(cv, x, ty-2.5*ks, math.Max(5*ks, w*v), 5*ks, 2.5*ks, uni(hex("#c9a464")))
+			kx := x + kr + (w-2*kr)*v
+			fillCircle(cv, kx, ty, kr, uni(hex("#c9a464")))
+			fillCircle(cv, kx, ty, kr-1.2*ks, uni(bright(hex("#c9a464"), map[bool]float64{true: 1.1, false: 1}[a.hover == "vol"])))
+		case tbSplit:
+			bs := st
+			bs.minW = w
+			a.button(cv, it.id, "", x, by, bs, false)
+			ax, ay := x+w/2, by+bh/2
+			ink := hex("#2b1a0c")
+			fillPoly(cv, [][2]float64{{ax - 4.5*ks, ay - 2.5*ks}, {ax + 4.5*ks, ay - 2.5*ks}, {ax, ay + 3*ks}}, uni(ink))
+			a.gmX, a.gmY = x-a.lastW-2*s, by+bh
+		case tbMenu:
+			bs := st
+			bs.minW = w - 16*ks
+			a.ddX, a.ddY, a.ddW = x, by+bh, w
+			a.button(cv, it.id, it.label, x, by, bs, true)
+		default:
+			bs := st
+			bs.off = it.off
+			bs.minW = w
+			a.button(cv, it.id, it.label, x, by, bs, false)
+		}
+		a.lastW = w
+		x += w
 	}
-	x += gap
-	x += a.button(cv, "new", "New Game", x, by, st, false) + gap
-	x += a.button(cv, "undo", "Undo", x, by, st, false) + gap
-	drawLabel := "Draw One"
-	if a.sv.Draw == 3 {
-		drawLabel = "Draw Three"
-	}
-	dst := st
-	dst.minW = a.buttonW("Draw Three", st)
-	a.ddX, a.ddY, a.ddW = x, by+bh, dst.minW+16*ks
-	x += a.button(cv, "draw", drawLabel, x, by, dst, true) + gap
-	ms := st
-	ms.off = !a.sv.Music
-	ml := "♪ Music"
-	if !a.sv.Music {
-		ml = "♪ Muted"
-	}
-	x += a.button(cv, "music", ml, x, by, ms, false) + gap
-	// volume slider (input type=range, accent #c9a464)
-	sw := 80 * ks
-	a.addHit("vol", x, by, sw, bh)
-	v := float64(a.sv.Vol) / 100
-	ty := mid
-	kr := 8 * ks
-	fillRRect(cv, x, ty-2.5*ks, sw, 5*ks, 2.5*ks, uni(col(255, 255, 255, .82)))
-	fillRRect(cv, x, ty-2.5*ks, math.Max(5*ks, sw*v), 5*ks, 2.5*ks, uni(hex("#c9a464")))
-	kx := x + kr + (sw-2*kr)*v
-	fillCircle(cv, kx, ty, kr, uni(hex("#c9a464")))
-	fillCircle(cv, kx, ty, kr-1.2*ks, uni(bright(hex("#c9a464"), map[bool]float64{true: 1.1, false: 1}[a.hover == "vol"])))
-	x += sw + gap
-	ss := st
-	ss.off = !a.sv.Sfx
-	x += a.button(cv, "sfx", "Sounds", x, by, ss, false) + gap
-	x += a.button(cv, "scores", "Scores", x, by, st, false) + gap
-	x += a.button(cv, "about", "Credits", x, by, st, false) + gap
-	// stats: Score, Moves, Time, Won - right-aligned, or centred on row two
+	// stats: Score (or Vegas poke), Moves, Time, Won
 	items := a.tbStats()
-	f, fb := fontSpec{Size: 15 * ks}, fontSpec{Size: 15 * ks, Bold: true}
+	sk := math.Min(ks, s*1.0)
+	f, fb := fontSpec{Size: 15 * sk}, fontSpec{Size: 15 * sk, Bold: true}
 	if L.twoRows {
 		f, fb = fontSpec{Size: 15 * s}, fontSpec{Size: 15 * s, Bold: true}
 		// a faint rule between the rows
@@ -435,28 +620,55 @@ func (a *App) drawToolbar(cv *image.RGBA) {
 	}
 }
 
-func (a *App) drawDropdown(cv *image.RGBA) {
+type menuItem struct {
+	id, label, key string
+	check          bool
+}
+
+// drawMenu draws the open drop-down (Draw One/Three, or the game menu).
+func (a *App) drawMenu(cv *image.RGBA) {
 	s := a.s
-	x, y, w := a.ddX, a.ddY+2*s, a.ddW
-	ih := 26 * s
-	fillRRect(cv, x+2*s, y+3*s, w, 2*ih+6*s, 4*s, uni(col(0, 0, 0, .35)))
-	fillRRect(cv, x, y, w, 2*ih+6*s, 4*s, uni(hex("#f7ecd2")))
-	strokeRRect(cv, x, y, w, 2*ih+6*s, 4*s, 1*s, uni(hex("#6b4a22")))
-	for i, opt := range []struct {
-		id, label string
-		v         int
-	}{{"dd1", "Draw One", 1}, {"dd3", "Draw Three", 3}} {
+	var items []menuItem
+	x, y, minW := a.ddX, a.ddY, a.ddW
+	if a.menu == "game" {
+		x, y, minW = a.gmX, a.gmY, 0
+		items = []menuItem{{"newgame", "New Game", "F2", false}, {"restart", "Restart This Deal", "", false}, {"daily", "Daily Claim", "", false}}
+	} else {
+		items = []menuItem{{"dd1", "Draw One", "", a.sv.Draw == 1}, {"dd3", "Draw Three", "", a.sv.Draw == 3}}
+	}
+	ih := 28 * s
+	fs := 14 * s
+	if a.touchUI() {
+		ih, fs = 42*s, 16*s
+	}
+	f := fontSpec{Size: fs}
+	w := minW
+	for _, it := range items {
+		lw := 30*s + measure(it.label, f) + 18*s
+		if it.key != "" {
+			lw += measure(it.key, f) + 24*s
+		}
+		w = math.Max(w, lw)
+	}
+	y += 2 * s
+	h := float64(len(items))*ih + 6*s
+	fillRRect(cv, x+2*s, y+3*s, w, h, 4*s, uni(col(0, 0, 0, .35)))
+	fillRRect(cv, x, y, w, h, 4*s, uni(hex("#f7ecd2")))
+	strokeRRect(cv, x, y, w, h, 4*s, 1*s, uni(hex("#6b4a22")))
+	for i, it := range items {
 		iy := y + 3*s + float64(i)*ih
-		a.addHit(opt.id, x, iy, w, ih)
-		if a.hover == opt.id || (a.hover == "" && a.sv.Draw == opt.v) {
+		a.addHit(it.id, x, iy, w, ih)
+		if a.hover == it.id {
 			fillRect(cv, image.Rect(int(x+2*s), int(iy), int(x+w-2*s), int(iy+ih)), hex("#c9a464"))
 		}
-		mark := ""
-		if a.sv.Draw == opt.v {
-			mark = "✓"
+		base := iy + ih/2 + fs*.34
+		if it.check {
+			drawText(cv, "✓", f, hex("#2b1a0c"), x+10*s, base, alignLeft)
 		}
-		drawText(cv, mark, fontSpec{Size: 14 * s}, hex("#2b1a0c"), x+9*s, iy+ih/2+14*s*.33, alignLeft)
-		drawText(cv, opt.label, fontSpec{Size: 14 * s}, hex("#2b1a0c"), x+26*s, iy+ih/2+14*s*.33, alignLeft)
+		drawText(cv, it.label, f, hex("#2b1a0c"), x+30*s, base, alignLeft)
+		if it.key != "" {
+			drawText(cv, it.key, f, hex("#7a5a30"), x+w-12*s, base, alignRight)
+		}
 	}
 }
 
@@ -509,7 +721,10 @@ func (a *App) drawSplash(cv *image.RGBA) {
 	pf := 17 * s
 	body := hex("#3a2412")
 	lines := []string{"Stake your claim on Bonanza Creek.", "Build each suit from Ace to King to strike it rich."}
-	hint := []string{"Drag cards, or click a card to send it where it fits.", "F2 new game · Ctrl+Z undo · F11 full screen"}
+	hint := []string{"Drag cards, or click a card to send it where it fits.", "F2 new game · Ctrl+Z undo · H hint · F11 full screen"}
+	if a.touchUI() {
+		hint[0] = "Drag cards, or tap one to send it where it fits."
+	}
 	cw := 0.0
 	for _, l := range lines {
 		cw = math.Max(cw, measure(l, fontSpec{Size: pf}))
@@ -520,7 +735,11 @@ func (a *App) drawSplash(cv *image.RGBA) {
 	cw = math.Min(cw, 520*s)
 	pw := cw + 96*s + 6*s
 	lh := pf * 1.55
+	small := btnStyle{size: 14 * s, padX: 12 * s, padY: 6 * s}
 	ph := 3*s + 34*s + 40*s*1.15 + 6*s + 16*s*1.15 + 18*s + 8*s + 2*lh + 22*s + a.buttonH(btnStyle{size: 18 * s, padY: 10 * s}) + 16*s + 2*13*s*1.25 + 18*s + 32*s + 34*s + 3*s
+	if a.resumable != nil {
+		ph += a.buttonH(small) + 12*s
+	}
 	px, py := math.Round((float64(a.W)-pw)/2), math.Round((float64(a.H)-ph)/2)
 	a.panelBox(cv, px, py, pw, ph)
 	a.addHit("panel", px, py, pw, ph)
@@ -533,7 +752,14 @@ func (a *App) drawSplash(cv *image.RGBA) {
 		y += lh
 	}
 	y += 22 * s
-	y += a.bigButton(cv, "start", "Stake Your Claim", cx, y) + 16*s
+	if a.resumable != nil {
+		y += a.bigButton(cv, "continue", "Continue Your Claim", cx, y) + 12*s
+		bw := a.buttonW("Stake a New Claim", small)
+		a.button(cv, "start", "Stake a New Claim", cx-bw/2, y, small, false)
+		y += a.buttonH(small) + 16*s
+	} else {
+		y += a.bigButton(cv, "start", "Stake Your Claim", cx, y) + 16*s
+	}
 	for _, l := range hint {
 		drawText(cv, l, fontSpec{Size: 13 * s}, hex("#7a5a30"), cx, y+13*s*.95, alignCenter)
 		y += 13 * s * 1.25

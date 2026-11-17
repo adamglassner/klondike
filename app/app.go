@@ -63,7 +63,8 @@ const (
 	panelSplash
 	panelWin
 	panelAbout
-	panelScores
+	panelScores // records: claim register, daily claim, statistics, stamps
+	panelOptions
 )
 
 type later struct {
@@ -108,10 +109,32 @@ type App struct {
 	highlight   int // board place to highlight (just saved), or 0
 	timers      []later
 
+	searching  bool // looking for a winnable deal
+	dealCh     chan dealReady
+	toastText  string
+	toastAt    float64
+	toastQueue []string
+	hintOn     hintShow
+	hintIdx    int
+	kb         kbState
+	resumable  *game // last session's unfinished game
+	recTab     int   // records panel tab
+	optScroll  float64
+	longAt     float64 // touch: when a press that may become a long press began
+	longX      float64
+	longY      float64
+	lastMoves  int // moves at the last resume save
+	scrollDrag struct {
+		on     bool
+		y0, s0 float64
+	}
+
 	hover, press   string
-	ddOpen         bool     // Draw One / Draw Three dropdown
+	menu           string   // open dropdown: "draw" or "game"
 	tb             tbLayout // how the toolbar fits this window
 	ddX, ddY, ddW  float64
+	gmX, gmY       float64 // where the game menu opens
+	lastW          float64
 	noHits         bool
 	slider         bool // dragging the volume slider
 	mouseX, mouseY float64
@@ -124,6 +147,9 @@ type App struct {
 	// platform hooks
 	SetCursor        func(hand bool)
 	ToggleFullscreen func()
+	ShowKeyboard     func() // touch keyboard for the nickname box
+	TouchScreen      bool   // the computer has a touch screen
+	touchInput       bool   // the current pointer event came from a finger or pen
 }
 
 type hit struct {
@@ -136,9 +162,12 @@ type rectF struct{ x, y, w, h float64 }
 func (r rectF) in(x, y float64) bool { return x >= r.x && x < r.x+r.w && y >= r.y && y < r.y+r.h }
 
 func newApp(w, h int, scale float64) *App {
-	a := &App{s: scale, rnd: rand.New(rand.NewSource(time.Now().UnixNano())), sv: loadSave(), panel: panelSplash, hudSec: -1}
+	a := &App{s: scale, rnd: rand.New(rand.NewSource(time.Now().UnixNano())), sv: loadSave(), panel: panelSplash, hudSec: -1,
+		dealCh: make(chan dealReady, 1), toastAt: -10}
 	a.SetCursor = func(bool) {}
 	a.ToggleFullscreen = func() {}
+	a.ShowKeyboard = func() {}
+	a.resumable = loadResume()
 	mix.mu.Lock()
 	mix.musicOn, mix.vol, mix.sfxOn = a.sv.Music, float64(a.sv.Vol)/100, a.sv.Sfx
 	mix.mu.Unlock()
@@ -150,6 +179,39 @@ func newApp(w, h int, scale float64) *App {
 /* ---------------------------------------------------------------- layout */
 
 func (a *App) colX(i int) float64 { return a.left + float64(i)*(a.cw+a.gap) }
+
+// Where the stock, waste and foundations go: mirrored for left-handed play.
+func (a *App) stockX() float64 {
+	if a.sv.LeftHanded {
+		return a.colX(6)
+	}
+	return a.colX(0)
+}
+
+func (a *App) wasteX() float64 {
+	if a.sv.LeftHanded {
+		return a.colX(5)
+	}
+	return a.colX(1)
+}
+
+func (a *App) foundX(f int) float64 {
+	if a.sv.LeftHanded {
+		return a.colX(f)
+	}
+	return a.colX(3 + f)
+}
+
+// touchUI reports whether controls are sized for fingers.
+func (a *App) touchUI() bool { return a.sv.Controls == 1 || (a.sv.Controls == 0 && a.TouchScreen) }
+
+// refreshLook rebuilds sprites and the table after an appearance option changes.
+func (a *App) refreshLook() {
+	a.spr = nil
+	a.table = nil
+	a.chrome = nil
+	a.resize(a.W, a.H, a.s)
+}
 
 func (a *App) resize(w, h int, scale float64) {
 	w, h = max(w, 320), max(h, 240)
@@ -163,21 +225,27 @@ func (a *App) resize(w, h int, scale float64) {
 	a.tb = a.fitToolbar()
 	a.bar = a.tb.bar
 	a.tw, a.th = float64(w), float64(h)-a.bar
-	const gr = .14
-	a.cw = math.Floor(math.Min((a.tw-40*s)/(7+6*gr), (a.th-30*s)/4.75))
+	gr, rows := .14, 4.75
+	if a.sv.LargeCards { // tighter gaps, and columns fan closer when long
+		gr, rows = .07, 4.3
+	}
+	a.cw = math.Floor(math.Min((a.tw-40*s)/(7+6*gr), (a.th-30*s)/rows))
 	a.cw = math.Max(a.cw, 30)
 	a.ch = math.Round(a.cw * 1.4)
 	a.gap = a.cw * gr
 	a.left = (a.tw - (7*a.cw + 6*a.gap)) / 2
 	a.top0 = math.Max(14*s, a.gap)
+	if a.sv.LargeCards {
+		a.top0 = math.Max(10*s, a.gap)
+	}
 	a.tabY = a.top0 + a.ch + a.gap*1.5
 	a.fanUp, a.fanDown = a.ch*.27, a.ch*.12
-	if a.spr == nil || math.Abs(a.spr.cw-a.cw) > .5 {
-		a.spr = buildSprites(a.cw, a.spr == nil) // fast now, sharp once resizing settles
+	if a.spr == nil || math.Abs(a.spr.cw-a.cw) > .5 || a.spr.back != a.sv.Back || a.spr.four != a.sv.FourColor {
+		a.spr = buildSprites(a.cw, a.spr == nil, a.sv.Back, a.sv.FourColor) // fast now, sharp once resizing settles
 		a.sprBuiltAt = a.now
 	}
 	if a.table == nil || a.table.Rect.Dx() != w || a.table.Rect.Dy() != int(a.th) {
-		a.table = coverTable(w, int(a.th), false)
+		a.table = coverTable(tableSource(a.sv.Table), w, int(a.th), false)
 		a.tableHQ = false
 	}
 	a.resizedAt = a.now
@@ -196,20 +264,24 @@ func (a *App) targets() []target {
 	L := make([]target, 0, 52)
 	for i, c := range g.Stock {
 		o := float64(i/6) * .8 * a.s
-		L = append(L, target{c, a.colX(0) - o, a.top0 - o, pileRef{pStock, 0}, i})
+		L = append(L, target{c, a.stockX() - o, a.top0 - o, pileRef{pStock, 0}, i})
 	}
 	n := len(g.Waste)
 	base := max(0, n-3)
 	for i, c := range g.Waste {
-		x := a.colX(1)
+		x := a.wasteX()
 		if g.Draw == 3 && i > base {
-			x += float64(i-base) * a.cw * .24
+			dx := float64(i-base) * a.cw * .24
+			if a.sv.LeftHanded {
+				dx = -dx // fan toward the middle of the table
+			}
+			x += dx
 		}
 		L = append(L, target{c, x, a.top0, pileRef{pWaste, 0}, i})
 	}
 	for f, p := range g.Found {
 		for i, c := range p {
-			L = append(L, target{c, a.colX(3 + f), a.top0, pileRef{pFound, f}, i})
+			L = append(L, target{c, a.foundX(f), a.top0, pileRef{pFound, f}, i})
 		}
 	}
 	avail := a.th - a.tabY - a.ch - 12*a.s
@@ -250,36 +322,21 @@ func (a *App) bindSound(g *game) {
 // preview shows a dealt table behind the title screen.
 func (a *App) preview() {
 	a.g = newGame(a.sv.Draw, a.rnd)
+	if a.resumable != nil {
+		a.g = a.resumable
+	}
 	a.bindSound(a.g)
 	for _, t := range a.targets() {
 		a.disp[t.c.ID] = dispCard{x: t.x, y: t.y, up: t.c.Up, f0: -1}
 	}
 }
 
-func (a *App) newGame() {
-	a.cel = nil
-	if a.panel == panelWin {
-		a.panel = panelNone
-	}
-	a.timers = nil
-	a.g = newGame(a.sv.Draw, a.rnd)
-	a.bindSound(a.g)
-	a.entry = winEntry{}
-	for i := range a.disp {
-		a.disp[i] = dispCard{x: a.colX(0), y: a.top0, f0: -1}
-	}
-	for i, id := range a.g.dealOrder() {
-		a.disp[id].wait = a.now + .25 + float64(i)*.055
-	}
-	a.drag = nil
-	a.sv.Played++
-	a.sv.write()
-	mix.play("shuffle", 0)
-	a.dirty = true
-}
+func (a *App) newGame() { a.deal(dealNew) }
 
 func (a *App) afterMove() {
 	g := a.g
+	a.countGame()
+	a.clearHint()
 	if g.allFound() {
 		a.win()
 		return
@@ -288,18 +345,25 @@ func (a *App) afterMove() {
 		g.Auto = true
 		a.nextAuto = a.now + .3
 	}
+	if g.Moves-a.lastMoves >= 10 { // keep the resume file fresh
+		a.lastMoves = g.Moves
+		a.saveResume()
+	}
 	a.dirty = true
 }
 
 func (a *App) win() {
 	g := a.g
-	g.Won, g.Auto = true, false
+	g.Won, g.Auto, g.Collect = true, false, false
+	a.kb.held = false
 	secs := max(1, int(math.Round(g.Elapsed)))
-	bonus := winBonus(secs)
-	g.Score += bonus
+	bonus := 0
+	if !g.Vegas {
+		bonus = winBonus(secs)
+		g.Score += bonus
+	}
+	a.recordWin(secs)
 	a.prepareEntry(g.Score, secs, g.Moves)
-	a.sv.Won++
-	a.sv.write()
 	mix.play("fanfare", 0)
 	a.after(.5, a.startCelebration)
 	gold := hex("#3a2412")
@@ -307,12 +371,24 @@ func (a *App) win() {
 	sp := []span{
 		{Text: "Your claim paid out in ", Color: gold}, {Text: clock(secs), Bold: true, Color: gold},
 		{Text: " with ", Color: gold}, {Text: itoa(g.Moves), Bold: true, Color: gold}, {Text: " moves.\n", Color: gold},
-		{Text: "Final score: ", Color: gold}, {Text: commas(g.Score), Bold: true, Color: gold},
 	}
-	if bonus > 0 {
-		sp = append(sp, span{Text: " (time bonus " + commas(bonus) + ")", Color: note})
+	if g.Vegas {
+		sp = append(sp, span{Text: "This deal: ", Color: gold}, span{Text: dollars(g.Score), Bold: true, Color: gold},
+			span{Text: "  ·  Your poke: ", Color: gold}, span{Text: dollars(a.sv.Poke), Bold: true, Color: gold})
+	} else {
+		sp = append(sp, span{Text: "Final score: ", Color: gold}, span{Text: commas(g.Score), Bold: true, Color: gold})
+		if bonus > 0 {
+			sp = append(sp, span{Text: " (time bonus " + commas(bonus) + ")", Color: note})
+		}
 	}
-	sp = append(sp, span{Text: "\nGames won: " + itoa(a.sv.Won) + " of " + itoa(a.sv.Played), Color: gold})
+	line := "\nGames won: " + itoa(a.sv.Won) + " of " + itoa(a.sv.Played)
+	if a.sv.Streak > 1 {
+		line += "  ·  Streak: " + itoa(a.sv.Streak)
+	}
+	if g.Daily != "" {
+		line = "\nDaily Claim for " + prettyShortDate(g.Daily) + " — struck!" + line
+	}
+	sp = append(sp, span{Text: line, Color: gold})
 	a.winSpans = sp
 	a.after(3.5, func() {
 		if a.g.Won {
@@ -324,6 +400,16 @@ func (a *App) win() {
 
 func (a *App) undo() {
 	if a.g != nil && a.started && a.g.doUndo() {
+		a.clearHint()
+		a.kb.held = false
+		a.dirty = true
+	}
+}
+
+func (a *App) redo() {
+	if a.g != nil && a.started && a.g.doRedo() {
+		a.clearHint()
+		a.kb.held = false
 		a.dirty = true
 	}
 }
@@ -331,7 +417,7 @@ func (a *App) undo() {
 func (a *App) setDraw(n int) {
 	a.sv.Draw = n
 	a.sv.write()
-	if a.g != nil && a.g.Moves == 0 {
+	if a.g != nil && a.g.Moves == 0 && a.g.Daily == "" {
 		a.g.Draw = n // takes effect now if no move was made yet
 	}
 	a.dirty = true
@@ -361,7 +447,7 @@ func (a *App) startCelebration() {
 			if r < len(a.g.Found[f]) {
 				id := a.g.Found[f][r].ID
 				c.order = append(c.order, id)
-				c.from[id] = [2]float64{a.colX(3 + f), a.top0}
+				c.from[id] = [2]float64{a.foundX(f), a.top0}
 				c.delay[id] = float64(len(c.order)-1) * .035
 			}
 		}
@@ -459,6 +545,11 @@ func (a *App) update(dt float64) bool {
 	real := math.Min(dt, 1) // the game clock runs on real time
 	dt = math.Min(dt, .05)  // animations never jump
 	a.now += dt
+	select {
+	case d := <-a.dealCh:
+		a.applyDeal(d)
+	default:
+	}
 	g := a.g
 	if len(a.timers) > 0 {
 		due := a.timers[:0:0]
@@ -477,11 +568,11 @@ func (a *App) update(dt float64) bool {
 	}
 	// sharpen sprites and table once resizing has settled
 	if a.spr != nil && !a.spr.hq && a.now-a.resizedAt > .15 {
-		a.spr = buildSprites(a.cw, true)
+		a.spr = buildSprites(a.cw, true, a.sv.Back, a.sv.FourColor)
 		a.dirty = true
 	}
 	if !a.tableHQ && a.now-a.resizedAt > .15 {
-		a.table = coverTable(a.W, int(a.th), true)
+		a.table = coverTable(tableSource(a.sv.Table), a.W, int(a.th), true)
 		a.tableHQ = true
 		a.dirty = true
 	}
@@ -493,7 +584,7 @@ func (a *App) update(dt float64) bool {
 			a.nextAuto = a.now + .095
 			a.afterMove()
 		} else {
-			g.Auto = false
+			g.Auto, g.Collect = false, false
 		}
 	}
 	moving := false
@@ -530,8 +621,27 @@ func (a *App) update(dt float64) bool {
 		a.moveSparks(dt)
 		moving = true
 	}
-	if g.Auto || len(a.timers) > 0 {
+	if g.Auto || len(a.timers) > 0 || a.searching {
 		moving = true
+	}
+	if a.toastStep() {
+		moving = true
+	}
+	if a.hintOn.on {
+		if a.now-a.hintOn.t0 > hintLife {
+			a.hintOn.on = false
+			a.dirty = true
+		} else {
+			moving = true
+		}
+	}
+	// touch: holding a finger still on the table collects cards
+	if a.longAt > 0 && a.now-a.longAt > .6 {
+		a.longAt = 0
+		if a.drag == nil || !a.drag.moved {
+			a.drag = nil
+			a.collect()
+		}
 	}
 	if sec := int(g.Elapsed); sec != a.hudSec {
 		a.hudSec = sec
@@ -561,8 +671,16 @@ func (a *App) hitAt(x, y float64) string {
 
 func (a *App) pointerMove(x, y float64) {
 	a.mouseX, a.mouseY = x, y
+	if a.longAt > 0 && math.Hypot(x-a.longX, y-a.longY) > 10*a.s {
+		a.longAt = 0
+	}
 	if a.slider {
 		a.setSliderFrom(x)
+		return
+	}
+	if a.scrollDrag.on {
+		a.scrollY = math.Max(0, a.scrollDrag.s0-(y-a.scrollDrag.y0))
+		a.dirty = true
 		return
 	}
 	if d := a.drag; d != nil {
@@ -580,32 +698,50 @@ func (a *App) pointerMove(x, y float64) {
 		return
 	}
 	h := a.hitAt(x, y)
+	if a.touchInput { // fingers don't hover
+		h = ""
+	}
 	if h != a.hover {
 		a.hover = h
 		a.dirty = true
 	}
-	a.SetCursor(h != "" && h != "panel")
+	a.SetCursor(h != "" && h != "panel" && h != "scroll")
 }
 
 func (a *App) pointerDown(x, y float64) {
 	a.mouseX, a.mouseY = x, y
+	a.kb.on, a.kb.held = false, false
 	h := a.hitAt(x, y)
 	a.press = h
-	if a.ddOpen {
+	if a.touchInput {
+		a.hover = h // show the press under the finger
+	}
+	if a.menu != "" {
 		switch h {
 		case "dd1":
 			a.setDraw(1)
 		case "dd3":
 			a.setDraw(3)
+		case "newgame", "restart", "daily":
+			a.menu = ""
+			a.click(h)
 		}
-		a.ddOpen = false
-		a.press = ""
+		if h != "draw" && h != "gamemenu" {
+			a.menu = ""
+			a.press = ""
+		}
 		a.dirty = true
-		return
+		if h != "draw" && h != "gamemenu" {
+			return
+		}
 	}
 	if h == "vol" {
 		a.slider = true
 		a.setSliderFrom(x)
+		return
+	}
+	if h == "scroll" {
+		a.scrollDrag.on, a.scrollDrag.y0, a.scrollDrag.s0 = true, y, a.scrollY
 		return
 	}
 	if h != "" {
@@ -616,12 +752,22 @@ func (a *App) pointerDown(x, y float64) {
 		return
 	}
 	g := a.g
-	if g.Won || g.Auto {
+	if g.Won || g.Auto || a.searching {
 		return
 	}
+	if a.touchInput {
+		a.longAt, a.longX, a.longY = a.now, x, y
+	}
+	e := 0.0
+	if a.touchInput {
+		e = 6 * a.s // fingers are less exact
+	}
 	p := struct{ x, y float64 }{x, y - a.bar}
-	in := func(px, py, w, h float64) bool { return p.x >= px && p.x <= px+w && p.y >= py && p.y <= py+h }
-	if in(a.colX(0)-4*a.s, a.top0-10*a.s, a.cw+8*a.s, a.ch+12*a.s) {
+	in := func(px, py, w, h float64) bool {
+		return p.x >= px-e && p.x <= px+w+e && p.y >= py-e && p.y <= py+h+e
+	}
+	if in(a.stockX()-4*a.s, a.top0-10*a.s, a.cw+8*a.s, a.ch+12*a.s) {
+		a.longAt = 0
 		if g.clickStock() {
 			a.afterMove()
 		}
@@ -656,9 +802,17 @@ func (a *App) pointerDown(x, y float64) {
 }
 
 func (a *App) pointerUp(x, y float64) {
+	a.longAt = 0
+	if a.touchInput && a.hover != "" {
+		defer func() { a.hover = ""; a.dirty = true }()
+	}
 	if a.slider {
 		a.slider = false
 		a.sv.write()
+		return
+	}
+	if a.scrollDrag.on {
+		a.scrollDrag.on = false
 		return
 	}
 	if d := a.drag; d != nil {
@@ -684,7 +838,7 @@ func (a *App) pointerUp(x, y float64) {
 				if d.src.Kind == pFound && d.src.I == f {
 					continue
 				}
-				if ar := ov(a.colX(3+f), a.top0); ar > ba && g.canFound(id, f) {
+				if ar := ov(a.foundX(f), a.top0); ar > ba && g.canFound(id, f) {
 					ba, best = ar, &pileRef{pFound, f}
 				}
 			}
@@ -723,18 +877,45 @@ func (a *App) pointerUp(x, y float64) {
 	a.click(h)
 }
 
+// pointerRight is a right click: collect everything that can go up.
+func (a *App) pointerRight(x, y float64) {
+	if a.panel == panelNone && a.menu == "" && y >= a.bar {
+		a.collect()
+	}
+}
+
 func (a *App) click(id string) {
+	if len(id) > 4 && id[:4] == "opt:" {
+		a.option(id[4:])
+		a.dirty = true
+		return
+	}
 	switch id {
-	case "new":
+	case "new", "newgame":
 		if a.started {
 			a.newGame()
 		} else {
 			a.start()
 		}
+	case "gamemenu":
+		a.toggleMenu("game")
+	case "restart":
+		if a.started && a.g != nil {
+			a.deal(dealRestart)
+		}
+	case "daily", "playdaily":
+		a.panel = panelNone
+		a.started = true
+		a.resumable = nil
+		a.deal(dealDaily)
 	case "undo":
 		a.undo()
+	case "redo":
+		a.redo()
+	case "hint":
+		a.hint()
 	case "draw":
-		a.ddOpen = !a.ddOpen
+		a.toggleMenu("draw")
 	case "music":
 		a.toggleMusic()
 	case "sfx":
@@ -742,17 +923,27 @@ func (a *App) click(id string) {
 	case "about":
 		a.prevPanel = a.panel
 		a.panel, a.aboutTab, a.scrollY = panelAbout, 0, 0
+	case "options":
+		a.prevPanel = a.panel
+		a.panel, a.scrollY = panelOptions, 0
 	case "scores":
 		a.prevPanel, a.highlight = a.panel, 0
-		a.panel = panelScores
+		a.panel, a.recTab, a.scrollY = panelScores, 0, 0
 	case "board":
 		a.prevPanel = a.panel
-		a.panel = panelScores
+		a.panel, a.recTab, a.scrollY = panelScores, 0, 0
+	case "rtab0", "rtab1", "rtab2", "rtab3":
+		a.recTab, a.scrollY = int(id[4]-'0'), 0
 	case "savescore":
 		a.saveEntry()
 	case "name":
 		a.entrySelAll = false
 		a.caretAt = a.now
+		if a.touchInput {
+			a.ShowKeyboard()
+		}
+	case "continue":
+		a.resumeGame()
 	case "start":
 		a.start()
 	case "again":
@@ -772,9 +963,18 @@ func (a *App) click(id string) {
 	a.dirty = true
 }
 
+func (a *App) toggleMenu(m string) {
+	if a.menu == m {
+		a.menu = ""
+	} else {
+		a.menu = m
+	}
+}
+
 func (a *App) start() {
 	a.panel = panelNone
 	a.started = true
+	a.resumable = nil
 	a.newGame()
 }
 
@@ -790,7 +990,7 @@ func (a *App) setSliderFrom(x float64) {
 }
 
 func (a *App) wheel(delta float64) {
-	if a.panel == panelAbout {
+	if a.panel == panelAbout || a.panel == panelScores || a.panel == panelOptions {
 		a.scrollY = math.Max(0, a.scrollY-delta*40*a.s)
 		a.dirty = true
 	}
@@ -802,9 +1002,22 @@ const (
 	keyF11
 	keyEscape
 	keyUndo // Ctrl+Z
+	keyRedo // Ctrl+Y
+	keyLeft
+	keyRight
+	keyUp
+	keyDown
+	keyEnter
+	keySpace
+	keyHint    // H
+	keyCollect // C
 )
 
 func (a *App) key(k int) {
+	defer func() { a.dirty = true }()
+	if a.typing() && k != keyF2 && k != keyF11 {
+		return // the nickname box has the keyboard
+	}
 	switch k {
 	case keyF2:
 		if a.started {
@@ -812,16 +1025,71 @@ func (a *App) key(k int) {
 		}
 	case keyUndo:
 		a.undo()
+	case keyRedo:
+		a.redo()
 	case keyF11:
 		a.ToggleFullscreen()
 	case keyEscape:
-		if a.ddOpen {
-			a.ddOpen = false
-		} else if a.panel == panelAbout || a.panel == panelScores {
+		switch {
+		case a.menu != "":
+			a.menu = ""
+		case a.kb.held:
+			a.kb.held = false
+		case a.panel == panelAbout || a.panel == panelScores || a.panel == panelOptions:
 			a.click("close")
+		default:
+			a.kb.on = false
+		}
+	case keyEnter:
+		switch a.panel {
+		case panelSplash:
+			if a.resumable != nil {
+				a.resumeGame()
+			} else {
+				a.start()
+			}
+		case panelWin:
+			a.newGame()
+		case panelNone:
+			a.kbSelect()
+		}
+	case keySpace:
+		if a.panel == panelNone {
+			a.kbDraw()
+		}
+	case keyHint:
+		if a.panel == panelNone {
+			a.hint()
+		}
+	case keyCollect:
+		if a.panel == panelNone {
+			a.collect()
+		}
+	case keyLeft, keyRight, keyUp, keyDown:
+		if a.panel != panelNone {
+			if k == keyUp || k == keyDown {
+				d := 1.0
+				if k == keyDown {
+					d = -1
+				}
+				a.wheel(d)
+			}
+			return
+		}
+		if !a.started || a.g.Won {
+			return
+		}
+		switch k {
+		case keyLeft:
+			a.kbMove(-1, 0)
+		case keyRight:
+			a.kbMove(1, 0)
+		case keyUp:
+			a.kbMove(0, -1)
+		case keyDown:
+			a.kbMove(0, 1)
 		}
 	}
-	a.dirty = true
 }
 
 func (a *App) saveWindow(w, h int, maximized bool) {

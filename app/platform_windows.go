@@ -40,6 +40,11 @@ var (
 	pSetCapture                = user32.NewProc("SetCapture")
 	pReleaseCapture            = user32.NewProc("ReleaseCapture")
 	pGetKeyState               = user32.NewProc("GetKeyState")
+	pGetMessageExtraInfo       = user32.NewProc("GetMessageExtraInfo")
+	pGetPointerType            = user32.NewProc("GetPointerType")
+	pScreenToClient            = user32.NewProc("ScreenToClient")
+	pShellExecuteW             = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
+	pGetSystemMetrics          = user32.NewProc("GetSystemMetrics")
 	pGetClientRect             = user32.NewProc("GetClientRect")
 	pSetWindowPos              = user32.NewProc("SetWindowPos")
 	pGetWindowLongPtrW         = user32.NewProc("GetWindowLongPtrW")
@@ -93,6 +98,11 @@ const (
 	wmMouseMove      = 0x0200
 	wmLButtonDown    = 0x0201
 	wmLButtonUp      = 0x0202
+	wmLButtonDblClk  = 0x0203
+	wmRButtonUp      = 0x0205
+	wmPointerUpdate  = 0x0245
+	wmPointerDown    = 0x0246
+	wmPointerUp      = 0x0247
 	wmMouseWheel     = 0x020A
 	wmEnterSizeMove  = 0x0231
 	wmExitSizeMove   = 0x0232
@@ -215,7 +225,7 @@ func run() {
 	icon, _, _ := pLoadImageW.Call(inst, uintptr(unsafe.Pointer(u16("APPICON"))), 1, 0, 0, 0x8040)
 	iconSm, _, _ := pLoadImageW.Call(inst, uintptr(unsafe.Pointer(u16("APPICON"))), 1, 16, 16, 0x8000)
 	wc := wndClassEx{
-		Style:   0x3, // CS_HREDRAW | CS_VREDRAW
+		Style:   0xB, // CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS (a fast second click still counts)
 		WndProc: syscall.NewCallback(wndProc), Instance: inst, Icon: icon, IconSm: iconSm,
 		Cursor: w.arrow, ClassName: u16(className),
 	}
@@ -268,6 +278,11 @@ func run() {
 		}
 	}
 	a.ToggleFullscreen = w.toggleFullscreen
+	a.ShowKeyboard = showTouchKeyboard
+	if n, _, _ := pGetSystemMetrics.Call(95); n > 0 { // SM_MAXIMUMTOUCHES
+		a.TouchScreen = true
+		a.refreshLook()
+	}
 	w.app = a
 	startAudio()
 	show := uintptr(1) // SW_SHOWNORMAL
@@ -411,13 +426,42 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 			return 1
 		}
 	case wmMouseMove:
+		a.touchInput = fromTouch()
 		a.pointerMove(float64(loword(lp)), float64(hiword(lp)))
 		return 0
-	case wmLButtonDown:
+	case wmPointerDown, wmPointerUpdate, wmPointerUp:
+		// Fingers and pens: handled here so a drag moves the card straight
+		// away instead of becoming a pan gesture or a press-and-hold.
+		if !touchPointer(wp) {
+			break // the mouse: its usual messages follow
+		}
+		if (wp>>16)&0x2000 == 0 { // not the primary finger
+			return 0
+		}
+		pt := [2]int32{int32(int16(lp & 0xFFFF)), int32(int16((lp >> 16) & 0xFFFF))}
+		pScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&pt)))
+		x, y := float64(pt[0]), float64(pt[1])
+		a.touchInput = true
+		switch uint32(m) {
+		case wmPointerDown:
+			a.pointerMove(x, y)
+			a.pointerDown(x, y)
+		case wmPointerUpdate:
+			a.pointerMove(x, y)
+		case wmPointerUp:
+			a.pointerUp(x, y)
+		}
+		return 0
+	case wmRButtonUp: // right click
+		a.pointerRight(float64(loword(lp)), float64(hiword(lp)))
+		return 0
+	case wmLButtonDown, wmLButtonDblClk:
+		a.touchInput = fromTouch()
 		pSetCapture.Call(hwnd)
 		a.pointerDown(float64(loword(lp)), float64(hiword(lp)))
 		return 0
 	case wmLButtonUp:
+		a.touchInput = fromTouch()
 		pReleaseCapture.Call()
 		a.pointerUp(float64(loword(lp)), float64(hiword(lp)))
 		return 0
@@ -442,20 +486,43 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		case 0x7A: // F11
 			a.key(keyF11)
 		case 0x1B: // Esc
-			if w.fullscreen && !a.ddOpen && a.panel != panelAbout {
+			if w.fullscreen && a.menu == "" && a.panel == panelNone {
 				w.toggleFullscreen()
 			} else {
 				a.key(keyEscape)
 			}
 		case 'Z':
-			if r, _, _ := pGetKeyState.Call(0x11); int16(r) < 0 {
+			if ctrlDown() {
 				a.key(keyUndo)
 			}
-		case 0x0D: // Alt+Enter: full screen
+		case 'Y':
+			if ctrlDown() {
+				a.key(keyRedo)
+			}
+		case 'H':
+			if !ctrlDown() {
+				a.key(keyHint)
+			}
+		case 'C':
+			if !ctrlDown() {
+				a.key(keyCollect)
+			}
+		case 0x25:
+			a.key(keyLeft)
+		case 0x26:
+			a.key(keyUp)
+		case 0x27:
+			a.key(keyRight)
+		case 0x28:
+			a.key(keyDown)
+		case 0x20:
+			a.key(keySpace)
+		case 0x0D: // Enter; Alt+Enter: full screen
 			if m == wmSysKeyDown {
 				w.toggleFullscreen()
 				return 0
 			}
+			a.key(keyEnter)
 		}
 		if m == wmSysKeyDown {
 			break
@@ -464,6 +531,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmClose:
 		zoomed, _, _ := pIsZoomed.Call(hwnd)
 		a.saveWindow(w.normalW, w.normalH, zoomed != 0 || (w.fullscreen && w.wasZoomed))
+		a.quit()
 		pDestroyWindow.Call(hwnd)
 		return 0
 	case wmDestroy:
@@ -499,6 +567,35 @@ func (w *win) toggleFullscreen() {
 }
 
 func gwlStyleU() int { return gwlStyle }
+
+// touchPointer reports whether a pointer message comes from a finger or pen.
+func touchPointer(wp uintptr) bool {
+	if pGetPointerType.Find() != nil {
+		return false
+	}
+	var t uint32
+	if r, _, _ := pGetPointerType.Call(wp&0xFFFF, uintptr(unsafe.Pointer(&t))); r == 0 {
+		return false
+	}
+	return t == 2 || t == 3 // PT_TOUCH, PT_PEN
+}
+
+func ctrlDown() bool { r, _, _ := pGetKeyState.Call(0x11); return int16(r) < 0 }
+
+// fromTouch reports whether the mouse message being handled was made by a
+// finger or pen (Windows marks those it synthesizes from touch).
+func fromTouch() bool {
+	r, _, _ := pGetMessageExtraInfo.Call()
+	return r&0xFFFFFF00 == 0xFF515700
+}
+
+// showTouchKeyboard brings up the on-screen keyboard for the nickname box.
+func showTouchKeyboard() {
+	p := os.Getenv("CommonProgramFiles") + `\microsoft shared\ink\TabTip.exe`
+	if _, err := os.Stat(p); err == nil {
+		pShellExecuteW.Call(0, uintptr(unsafe.Pointer(u16("open"))), uintptr(unsafe.Pointer(u16(p))), 0, 0, 5)
+	}
+}
 
 /* ------------------------------------------------------------------ sound */
 

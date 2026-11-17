@@ -83,10 +83,15 @@ type winEntry struct {
 	result scoreEntry
 	rank   int // place on the board once saved
 	saved  bool
+	vegas  bool // Vegas deals aren't entered
 }
 
 // prepareEntry is called when a game is won.
 func (a *App) prepareEntry(score, secs, moves int) {
+	if a.g.Vegas {
+		a.entry = winEntry{vegas: true}
+		return
+	}
 	e := scoreEntry{Score: score, Secs: secs, Moves: moves, Draw: a.g.Draw, Date: time.Now().Format("2006-01-02")}
 	name := a.sv.Nickname
 	if name == "" {
@@ -155,6 +160,10 @@ func (a *App) drawEntry(cv *image.RGBA, cx, y float64) float64 {
 	s := a.s
 	w := &a.entry
 	ink, note := hex("#3a2412"), hex("#7a5a30")
+	if w.vegas {
+		drawText(cv, "Vegas deals pay in gold dust, so they aren't entered in the claim register.", fontSpec{Size: 14 * s}, note, cx, y+14*s, alignCenter)
+		return 22 * s
+	}
 	if !w.open {
 		top := ""
 		if len(a.sv.Scores) > 0 {
@@ -215,7 +224,8 @@ func (a *App) drawScores(cv *image.RGBA) {
 	pw := cw + 80*s + 6*s
 	rowH := 30 * s
 	st := btnStyle{size: 14 * s, padX: 12 * s, padY: 6 * s}
-	ph := 3*s + 32*s + 32*s*1.15 + 6*s + 16*s*1.15 + 20*s + 24*s + boardSize*rowH + 20*s + 34*s + 18*s + a.buttonH(st) + 30*s + 3*s
+	tabH := a.buttonH(st) + 16*s
+	ph := 3*s + 32*s + 32*s*1.15 + 6*s + 16*s*1.15 + 16*s + tabH + 24*s + boardSize*rowH + 20*s + 34*s + 18*s + a.buttonH(st) + 30*s + 3*s
 	if lim := float64(a.H) - 20*s; ph > lim { // short windows: squeeze the rows
 		rowH -= (ph - lim) / boardSize
 		ph = lim
@@ -226,8 +236,20 @@ func (a *App) drawScores(cv *image.RGBA) {
 	cx := px + pw/2
 	x0 := px + 3*s + 40*s
 	y := py + 3*s + 32*s
-	y += a.h1(cv, "CLAIM REGISTER", 32, cx, y) + 6*s
-	y += a.h2(cv, "TOP TEN STRIKES ON THIS COMPUTER", cx, y) + 20*s
+	titles := [][2]string{{"CLAIM REGISTER", "TOP TEN STRIKES ON THIS COMPUTER"}, {"DAILY CLAIM", "ONE DEAL A DAY · THE SAME FOR EVERYONE"},
+		{"STATISTICS", "YOUR RECORD AT THE DIGGINGS"}, {"ASSAY STAMPS", "MARKS OF A SEASONED PROSPECTOR"}}
+	tt := titles[a.recTab%4]
+	y += a.h1(cv, tt[0], 32, cx, y) + 6*s
+	y += a.h2(cv, tt[1], cx, y) + 16*s
+	a.tabs(cv, []string{"Claim Register", "Daily Claim", "Statistics", "Stamps"}, "rtab", a.recTab, cx, y)
+	y += tabH
+	if a.recTab != 0 {
+		h := 24*s + boardSize*rowH + 20*s + 34*s
+		a.drawRecordTab(cv, x0, y, cw, h)
+		y += h + 18*s
+		a.bigButtonSmall(cv, "close", "Back to the Table", cx, y)
+		return
+	}
 
 	ink, head, note := hex("#3a2412"), hex("#6b4a22"), hex("#7a5a30")
 	cols := []struct {
